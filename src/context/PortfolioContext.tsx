@@ -9,6 +9,7 @@ import {
   SocialLinkItem,
   AudioConfig,
   SfxActionType,
+  ResumeMetadata,
 } from '../types/portfolio';
 import {
   initialPortfolioData,
@@ -19,6 +20,16 @@ import {
 } from '../data/portfolioData';
 import { generateVideoThumbnailAndMeta } from '../utils/videoThumbnail';
 import { soundEngine } from '../utils/soundEngine';
+import {
+  syncMediaUsageAndVisibility,
+  createPublicPortfolioSnapshot,
+  detectMediaCategory,
+} from '../utils/mediaUsageTracker';
+import {
+  ADMIN_TOKEN_SESSION_KEY,
+  appendAdminTokenToUrl,
+  getAdminHeaders,
+} from '../utils/mediaUploadService';
 
 export type AdminRouteTab =
   | 'dashboard'
@@ -39,6 +50,7 @@ export type AdminRouteTab =
 
 interface PortfolioContextType {
   data: PortfolioConfig;
+  adminMediaLibrary: MediaMetadata[];
   updateData: (updater: (prev: PortfolioConfig) => PortfolioConfig) => void;
   resetToDefaults: () => void;
   isAdminOpen: boolean;
@@ -54,6 +66,20 @@ interface PortfolioContextType {
   visitorAudioMuted: boolean;
   toggleVisitorAudioMute: () => void;
   triggerSfx: (action: SfxActionType, forcePreview?: boolean) => void;
+  // Scoped Public Asset Getters (Never expose private media)
+  getPublicProfilePhoto: () => string;
+  getPublicProjectVideo: (projectId: string) => {
+    videoUrl: string;
+    thumbnailUrl: string;
+    durationFormatted: string;
+    mimeType: string;
+  } | null;
+  getPublicBeforeAfterImages: (itemId: string) => {
+    beforeImageUrl: string;
+    afterImageUrl: string;
+  } | null;
+  getPublicResume: () => ResumeMetadata | null;
+  getPublicSoftwareLogo: (toolId: string) => string | null;
   activeVideoModal: {
     isOpen: boolean;
     projectId?: string;
@@ -77,36 +103,77 @@ const normalizeMediaList = (rawList: any[]): MediaMetadata[] => {
     Array.isArray(rawList) && rawList.length > 0 ? rawList : initialPortfolioData.mediaLibrary;
   const normalized: MediaMetadata[] = baseList
     .filter((m) => {
-      const url = m?.mediaUrl || m?.storageUrl || '';
+      const url = m?.mediaUrl || m?.storageUrl || m?.publicUrl || '';
       return typeof url === 'string' && !url.startsWith('blob:');
     })
     .map((m) => {
-      const playableUrl = m.mediaUrl || m.storageUrl || '';
+      const playableUrl = m.mediaUrl || m.storageUrl || m.publicUrl || '';
       const thumbUrl = m.thumbnailUrl || m.thumbnail || '';
+      const filename = m.filename || m.fileName || m.originalFileName || 'video.mp4';
+      const mimeType =
+        m.mimeType || (m.type && m.type.includes('/') ? m.type : 'video/mp4');
+      const mediaType = m.mediaType || detectMediaCategory(mimeType, filename);
+      const size = Number(m.size ?? m.fileSize) || 0;
+      const createdAt =
+        Number(m.createdAt ?? m.uploadedAt) ||
+        Date.parse(m.uploadDate || '') ||
+        Date.now();
+      const status = m.status || m.uploadStatus || 'ready';
+      const [wStr, hStr] = (m.resolution || '').split('x');
+      const width = m.width ?? (parseInt(wStr, 10) || null);
+      const height = m.height ?? (parseInt(hStr, 10) || null);
+
       return {
         id: m.id,
-        filename: m.filename || 'video.mp4',
-        type: 'video',
-        mimeType: m.mimeType || (m.type && m.type.includes('/') ? m.type : 'video/mp4'),
-        size: Number(m.size) || 0,
+        filename,
+        fileName: filename,
+        originalFileName: m.originalFileName || filename,
+        type: mediaType,
+        mediaType,
+        mimeType,
+        size,
+        fileSize: size,
         duration: m.duration !== undefined && m.duration !== null ? Number(m.duration) : 0,
-        durationFormatted: m.durationFormatted || '00:15',
+        durationFormatted: m.durationFormatted || (mediaType === 'video' ? '00:15' : '—'),
+        width,
+        height,
+        resolution:
+          m.resolution || (width && height ? `${width}x${height}` : '1920x1080'),
+        storagePath: m.storagePath || playableUrl,
         mediaUrl: playableUrl,
         storageUrl: playableUrl,
+        publicUrl: playableUrl,
         thumbnailUrl: thumbUrl || null,
         thumbnail: thumbUrl || '',
-        createdAt: Number(m.createdAt) || Date.parse(m.uploadDate || '') || Date.now(),
-        uploadDate: m.uploadDate || new Date().toISOString(),
-        visibility: m.visibility === 'private' ? 'private' : 'public',
-        uploadStatus: m.uploadStatus || 'ready',
-        resolution: m.resolution || '1920x1080',
+        createdAt,
+        uploadedAt: createdAt,
+        updatedAt: Number(m.updatedAt) || createdAt,
+        uploadDate: m.uploadDate || new Date(createdAt).toISOString(),
+        uploadedBy: m.uploadedBy || 'admin',
+        visibility: m.visibility === 'public' ? 'public' : 'private',
+        status,
+        uploadStatus: status,
+        isPublished: Boolean(m.isPublished),
+        usedBy: Array.isArray(m.usedBy) ? m.usedBy : [],
+        usageCount: Number(m.usageCount) || 0,
       };
     });
 
   const existingIds = new Set(normalized.map((item) => item.id));
   for (const defMedia of initialPortfolioData.mediaLibrary) {
     if (!existingIds.has(defMedia.id)) {
-      normalized.push(defMedia);
+      normalized.push({
+        ...defMedia,
+        fileName: defMedia.filename,
+        originalFileName: defMedia.filename,
+        mediaType: 'video',
+        fileSize: defMedia.size,
+        publicUrl: defMedia.mediaUrl,
+        uploadedAt: defMedia.createdAt,
+        updatedAt: defMedia.createdAt,
+        uploadedBy: 'admin',
+        status: defMedia.uploadStatus || 'ready',
+      });
     }
   }
   return normalized;
@@ -136,7 +203,6 @@ const normalizeSoftwareTools = (parsed: any): SoftwareToolItem[] => {
       .sort((a: SoftwareToolItem, b: SoftwareToolItem) => a.order - b.order);
   }
 
-  // Migrate legacy editingTools + otherTools arrays if softwareTools is not yet saved
   const legacyEditing: any[] = Array.isArray(parsed.editingTools) ? parsed.editingTools : [];
   const legacyOther: any[] = Array.isArray(parsed.otherTools) ? parsed.otherTools : [];
   if (legacyEditing.length > 0 || legacyOther.length > 0) {
@@ -236,7 +302,6 @@ const normalizeSocialLinks = (parsed: any): SocialLinkItem[] => {
       .sort((a: SocialLinkItem, b: SocialLinkItem) => a.order - b.order);
   }
 
-  // Migrate legacy socials object into socialLinks array
   if (parsed.socials && typeof parsed.socials === 'object') {
     const migrated: SocialLinkItem[] = [];
     const entries: Array<{ key: string; label: string; iconType: string }> = [
@@ -310,7 +375,9 @@ const normalizeSectionOrder = (rawOrder: any[]): SectionConfig[] => {
 };
 
 const normalizePortfolioConfig = (parsed: any): PortfolioConfig => {
-  if (!parsed || typeof parsed !== 'object') return initialPortfolioData;
+  if (!parsed || typeof parsed !== 'object') {
+    return syncMediaUsageAndVisibility(initialPortfolioData);
+  }
 
   const mergedMedia = normalizeMediaList(parsed.mediaLibrary);
   const migratedProjects = Array.isArray(parsed.projects)
@@ -343,7 +410,7 @@ const normalizePortfolioConfig = (parsed: any): PortfolioConfig => {
   const normalizedSocials = normalizeSocialLinks(parsed);
   const normalizedAudio = normalizeAudioConfig(parsed.audio);
 
-  return {
+  const rawCombined: PortfolioConfig = {
     ...initialPortfolioData,
     ...parsed,
     profile: {
@@ -378,6 +445,9 @@ const normalizePortfolioConfig = (parsed: any): PortfolioConfig => {
     mediaLibrary: mergedMedia,
     projects: migratedProjects,
   };
+
+  // Compute accurate usedBy, usageCount, visibility ('public' vs 'private'), and isPublished
+  return syncMediaUsageAndVisibility(rawCombined);
 };
 
 const parseAdminRouteFromPath = (
@@ -419,7 +489,7 @@ const parseAdminRouteFromPath = (
 const PortfolioContext = createContext<PortfolioContextType | undefined>(undefined);
 
 export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [data, setData] = useState<PortfolioConfig>(() => {
+  const [fullState, setFullState] = useState<PortfolioConfig>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
@@ -428,7 +498,7 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     } catch (e) {
       console.error('Failed to load portfolio state from localStorage:', e);
     }
-    return initialPortfolioData;
+    return normalizePortfolioConfig(initialPortfolioData);
   });
 
   const initialRoute = parseAdminRouteFromPath(window.location.pathname);
@@ -451,10 +521,17 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const hydratedFromServer = useRef(false);
 
+  // Public visitors ONLY receive published media in `data.mediaLibrary`.
+  // Authenticated Admin users receive the full private + public `adminMediaLibrary`.
+  const publicSnapshot = createPublicPortfolioSnapshot(fullState);
+  const exposedData: PortfolioConfig =
+    isAdminAuthenticated && isAdminOpen ? fullState : publicSnapshot;
+  const adminMediaLibrary: MediaMetadata[] = isAdminAuthenticated ? fullState.mediaLibrary : [];
+
   // Keep soundEngine updated with latest audio config
   useEffect(() => {
-    soundEngine.updateConfig(data.audio || DEFAULT_AUDIO_CONFIG);
-  }, [data.audio]);
+    soundEngine.updateConfig(fullState.audio || DEFAULT_AUDIO_CONFIG);
+  }, [fullState.audio]);
 
   // Automatic BGM ducking when project video modal opens or closes
   const setActiveVideoModal = (modal: PortfolioContextType['activeVideoModal']) => {
@@ -494,7 +571,10 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         const sfxAttr = interactive.getAttribute('data-sfx') as SfxActionType | null;
         if (sfxAttr) {
           soundEngine.playSfx(sfxAttr);
-        } else if (interactive.tagName.toLowerCase() === 'a' && interactive.getAttribute('href')?.startsWith('#')) {
+        } else if (
+          interactive.tagName.toLowerCase() === 'a' &&
+          interactive.getAttribute('href')?.startsWith('#')
+        ) {
           soundEngine.playSfx('navigation');
         } else {
           soundEngine.playSfx('buttonClick');
@@ -519,10 +599,13 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     };
   }, []);
 
-  // Hydrate persistent state from backend server on load
+  // Hydrate persistent state from backend server on load or when Admin authentication changes
   useEffect(() => {
     let mounted = true;
-    fetch('/api/portfolio')
+    const endpoint = isAdminAuthenticated ? '/api/admin/portfolio' : '/api/portfolio/public';
+    const headers = isAdminAuthenticated ? getAdminHeaders() : {};
+
+    fetch(endpoint, { headers })
       .then((r) => (r.ok ? r.json() : null))
       .then((payload) => {
         if (!mounted || !payload) return;
@@ -530,18 +613,20 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         if (remoteConfig && remoteConfig.profile) {
           hydratedFromServer.current = true;
           const normalized = normalizePortfolioConfig(remoteConfig);
-          setData(normalized);
-          try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
-          } catch {
-            // ignore quota warning
+          setFullState(normalized);
+          if (isAdminAuthenticated) {
+            try {
+              localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+            } catch {
+              // ignore quota warning
+            }
           }
         } else {
           hydratedFromServer.current = true;
           fetch('/api/portfolio', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data),
+            headers: getAdminHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify(fullState),
           }).catch(() => {});
         }
       })
@@ -551,12 +636,12 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [isAdminAuthenticated]);
 
   // Automatically generate missing thumbnails for any Media Library video item
   const generatingThumbsRef = useRef<Set<string>>(new Set());
   const ensureVideoThumbnail = async (mediaId: string): Promise<string> => {
-    const target = data.mediaLibrary.find((m) => m.id === mediaId);
+    const target = fullState.mediaLibrary.find((m) => m.id === mediaId);
     if (!target) return '';
     const existingThumb = target.thumbnailUrl || target.thumbnail;
     if (existingThumb) return existingThumb;
@@ -567,7 +652,8 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     generatingThumbsRef.current.add(mediaId);
     try {
-      const info = await generateVideoThumbnailAndMeta(playableUrl, mediaId);
+      const authPlayableUrl = appendAdminTokenToUrl(playableUrl, isAdminAuthenticated);
+      const info = await generateVideoThumbnailAndMeta(authPlayableUrl, mediaId);
       if (info.thumbnailUrl) {
         updateData((prev) => ({
           ...prev,
@@ -580,6 +666,7 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
                   duration: info.duration || m.duration,
                   durationFormatted:
                     info.duration > 0 ? info.durationFormatted : m.durationFormatted,
+                  status: 'ready',
                   uploadStatus: 'ready',
                 }
               : m
@@ -594,16 +681,19 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   };
 
   useEffect(() => {
-    data.mediaLibrary.forEach((media) => {
+    fullState.mediaLibrary.forEach((media) => {
       if (
-        (media.type === 'video' || media.mimeType?.startsWith('video/')) &&
+        (media.type === 'video' ||
+          media.mediaType === 'video' ||
+          media.mimeType?.startsWith('video/')) &&
         !media.thumbnailUrl &&
-        !media.thumbnail
+        !media.thumbnail &&
+        (media.visibility === 'public' || isAdminAuthenticated)
       ) {
         ensureVideoThumbnail(media.id);
       }
     });
-  }, [data.mediaLibrary]);
+  }, [fullState.mediaLibrary, isAdminAuthenticated]);
 
   // Listen to browser popstate (back/forward navigation for /admin routes)
   useEffect(() => {
@@ -698,7 +788,7 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   // Apply dynamic fonts & theme colors to document root
   useEffect(() => {
     const root = document.documentElement;
-    const { theme } = data;
+    const { theme } = fullState;
 
     root.style.setProperty(
       '--font-primary',
@@ -745,17 +835,23 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       .join('\n');
 
     styleEl.textContent = fontFaces;
-  }, [data.theme]);
+  }, [fullState.theme]);
 
-  const persistStateEverywhere = (nextData: PortfolioConfig) => {
+  const persistStateEverywhere = (nextData: PortfolioConfig, allowEmptyMedia: boolean = false) => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(nextData));
     } catch (e) {
       console.warn('Could not persist full state to localStorage:', e);
     }
+    const headers: Record<string, string> = getAdminHeaders({
+      'Content-Type': 'application/json',
+    });
+    if (allowEmptyMedia) {
+      headers['x-allow-empty-media'] = '1';
+    }
     fetch('/api/portfolio', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(nextData),
     }).catch((err) => {
       console.warn('Could not sync portfolio state to server:', err);
@@ -763,10 +859,9 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   };
 
   const updateData = (updater: (prev: PortfolioConfig) => PortfolioConfig) => {
-    setData((prev) => {
+    setFullState((prev) => {
       const rawNext = updater(prev);
-      // Keep legacy editingTools / otherTools synchronized with softwareTools
-      const next: PortfolioConfig = {
+      const withSyncedTools: PortfolioConfig = {
         ...rawNext,
         editingTools: (rawNext.softwareTools || []).filter(
           (t) => t.category !== 'Other Tools' && t.category !== 'other'
@@ -775,6 +870,8 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           (t) => t.category === 'Other Tools' || t.category === 'other'
         ),
       };
+      // Automatically recompute usedBy, usageCount, visibility ('public' | 'private'), and isPublished
+      const next = syncMediaUsageAndVisibility(withSyncedTools);
       persistStateEverywhere(next);
       return next;
     });
@@ -782,8 +879,69 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const resetToDefaults = () => {
     localStorage.removeItem(STORAGE_KEY);
-    setData(initialPortfolioData);
-    persistStateEverywhere(initialPortfolioData);
+    const normalizedDefaults = syncMediaUsageAndVisibility(initialPortfolioData);
+    setFullState(normalizedDefaults);
+    persistStateEverywhere(normalizedDefaults, true);
+  };
+
+  // Scoped Public Asset Getters — Never expose private/unpublished media
+  const getPublicProfilePhoto = (): string => {
+    return publicSnapshot.profile.portraitUrl || '';
+  };
+
+  const getPublicProjectVideo = (projectId: string) => {
+    const proj = publicSnapshot.projects.find((p) => p.id === projectId);
+    if (!proj) return null;
+    const publishedMedia = publicSnapshot.mediaLibrary.find(
+      (m) =>
+        m.id === proj.videoMediaId &&
+        m.visibility === 'public' &&
+        m.isPublished === true
+    );
+    if (!publishedMedia) {
+      return {
+        videoUrl: '',
+        thumbnailUrl: proj.thumbnail || '',
+        durationFormatted: proj.duration || '00:15',
+        mimeType: 'video/mp4',
+      };
+    }
+    return {
+      videoUrl:
+        publishedMedia.publicUrl ||
+        publishedMedia.mediaUrl ||
+        publishedMedia.storageUrl ||
+        '',
+      thumbnailUrl:
+        publishedMedia.thumbnailUrl ||
+        publishedMedia.thumbnail ||
+        proj.thumbnail ||
+        '',
+      durationFormatted: publishedMedia.durationFormatted || proj.duration || '00:15',
+      mimeType: publishedMedia.mimeType || 'video/mp4',
+    };
+  };
+
+  const getPublicBeforeAfterImages = (itemId: string) => {
+    const item = publicSnapshot.beforeAfterItems.find(
+      (ba) => ba.id === itemId && ba.visible
+    );
+    if (!item) return null;
+    return {
+      beforeImageUrl: item.beforeImageUrl,
+      afterImageUrl: item.afterImageUrl,
+    };
+  };
+
+  const getPublicResume = (): ResumeMetadata | null => {
+    return publicSnapshot.resume || null;
+  };
+
+  const getPublicSoftwareLogo = (toolId: string): string | null => {
+    const tool = publicSnapshot.softwareTools.find(
+      (t) => t.id === toolId && t.enabled
+    );
+    return tool?.logoUrl || null;
   };
 
   // Fixed case-sensitive Admin password check
@@ -795,6 +953,7 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setIsAdminAuthenticated(true);
       try {
         sessionStorage.setItem(ADMIN_AUTH_SESSION_KEY, 'true');
+        sessionStorage.setItem(ADMIN_TOKEN_SESSION_KEY, expected);
       } catch {
         // ignore storage error
       }
@@ -807,6 +966,7 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setIsAdminAuthenticated(false);
     try {
       sessionStorage.removeItem(ADMIN_AUTH_SESSION_KEY);
+      sessionStorage.removeItem(ADMIN_TOKEN_SESSION_KEY);
     } catch {
       // ignore storage error
     }
@@ -850,7 +1010,8 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   return (
     <PortfolioContext.Provider
       value={{
-        data,
+        data: exposedData,
+        adminMediaLibrary,
         updateData,
         resetToDefaults,
         isAdminOpen,
@@ -866,6 +1027,11 @@ export const PortfolioProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         visitorAudioMuted,
         toggleVisitorAudioMute,
         triggerSfx,
+        getPublicProfilePhoto,
+        getPublicProjectVideo,
+        getPublicBeforeAfterImages,
+        getPublicResume,
+        getPublicSoftwareLogo,
         activeVideoModal,
         setActiveVideoModal,
       }}

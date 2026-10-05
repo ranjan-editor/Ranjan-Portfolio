@@ -8,7 +8,7 @@ const isVideoMedia = (m: MediaMetadata) =>
   m.type === 'video' || m.type?.toLowerCase().startsWith('video/') || m.mimeType?.toLowerCase().startsWith('video/');
 
 export const Projects: React.FC = () => {
-  const { data, setActiveVideoModal, triggerSfx } = usePortfolio();
+  const { data, setActiveVideoModal, triggerSfx, getPublicProjectVideo } = usePortfolio();
   const [selectedTag, setSelectedTag] = useState<string>('All');
   const [failedImages, setFailedImages] = useState<Record<string, boolean>>({});
 
@@ -21,23 +21,19 @@ export const Projects: React.FC = () => {
 
   const handleOpenProject = (project: ProjectItem) => {
     triggerSfx('projectOpen');
-    const linkedVideo = data.mediaLibrary.find(
-      (m) => m.id === project.videoMediaId && isVideoMedia(m) && m.visibility !== 'private'
-    );
-
-    const playableUrl = linkedVideo ? linkedVideo.mediaUrl || linkedVideo.storageUrl : '';
-    const resolvedThumbnail =
-      linkedVideo?.thumbnailUrl || linkedVideo?.thumbnail || project.thumbnail || '';
+    const resolved = getPublicProjectVideo(project.id);
+    const playableUrl = resolved?.videoUrl || '';
+    const resolvedThumbnail = resolved?.thumbnailUrl || project.thumbnail || '';
 
     setActiveVideoModal({
       isOpen: true,
       projectId: project.id,
       videoMediaId: project.videoMediaId,
-      mediaType: linkedVideo?.mimeType || linkedVideo?.type || 'video/mp4',
+      mediaType: resolved?.mimeType || 'video/mp4',
       title: project.title,
       videoUrl: playableUrl,
       thumbnail: resolvedThumbnail,
-      duration: linkedVideo?.durationFormatted || project.duration,
+      duration: resolved?.durationFormatted || project.duration,
       tags: project.tags,
       description: project.description,
     });
@@ -99,13 +95,10 @@ export const Projects: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
             {filteredProjects.map((project, index) => {
               const hasFailed = failedImages[project.id];
-              const linkedVideo = data.mediaLibrary.find(
-                (m) => m.id === project.videoMediaId && isVideoMedia(m)
-              );
-              const displayDuration = linkedVideo?.durationFormatted || project.duration;
+              const resolved = getPublicProjectVideo(project.id);
+              const displayDuration = resolved?.durationFormatted || project.duration;
               // Always prefer the selected video's automatic thumbnail first
-              const displayThumbnail =
-                linkedVideo?.thumbnailUrl || linkedVideo?.thumbnail || project.thumbnail || '';
+              const displayThumbnail = resolved?.thumbnailUrl || project.thumbnail || '';
 
               return (
                 <motion.article

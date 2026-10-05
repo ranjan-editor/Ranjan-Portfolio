@@ -13,6 +13,10 @@ import {
 import { usePortfolio } from '../../context/PortfolioContext';
 import { SfxActionType } from '../../types/portfolio';
 import { DEFAULT_AUDIO_CONFIG } from '../../data/portfolioData';
+import {
+  uploadAnyMediaToLibrary,
+  appendAdminTokenToUrl,
+} from '../../utils/mediaUploadService';
 
 const SFX_ACTION_ORDER: SfxActionType[] = [
   'buttonClick',
@@ -33,9 +37,22 @@ const formatBytes = (bytes?: number) => {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 };
 
-export const AdminAudioTab: React.FC<{ onStatus: (msg: string) => void }> = ({ onStatus }) => {
-  const { data, updateData, triggerSfx, visitorAudioMuted, toggleVisitorAudioMute } =
-    usePortfolio();
+export const AdminAudioTab: React.FC<{
+  onStatus?: (msg: string) => void;
+  onStatusMessage?: (msg: string) => void;
+}> = ({ onStatus, onStatusMessage }) => {
+  const reportStatus = (msg: string) => {
+    if (onStatusMessage) onStatusMessage(msg);
+    else if (onStatus) onStatus(msg);
+  };
+  const {
+    data,
+    updateData,
+    triggerSfx,
+    visitorAudioMuted,
+    toggleVisitorAudioMute,
+    isAdminAuthenticated,
+  } = usePortfolio();
   const audio = data.audio || DEFAULT_AUDIO_CONFIG;
 
   const [uploadingSlot, setUploadingSlot] = useState<string | null>(null);
@@ -56,7 +73,7 @@ export const AdminAudioTab: React.FC<{ onStatus: (msg: string) => void }> = ({ o
       stopBgmPreview();
       return;
     }
-    const el = new Audio(audio.bgmUrl);
+    const el = new Audio(appendAdminTokenToUrl(audio.bgmUrl, isAdminAuthenticated));
     el.volume = Math.max(0.05, Math.min(1, audio.bgmVolume ?? 0.25));
     el.onended = () => setIsBgmPreviewPlaying(false);
     el.play().catch(() => {});
@@ -74,46 +91,43 @@ export const AdminAudioTab: React.FC<{ onStatus: (msg: string) => void }> = ({ o
 
     setUploadingSlot(slotKey);
     try {
-      const res = await fetch('/api/audio/upload', {
-        method: 'POST',
-        headers: {
-          'Content-Type': file.type || 'audio/mpeg',
-          'x-filename': encodeURIComponent(file.name),
-          'x-audio-slot': slotKey,
-        },
-        body: file,
+      const mediaRecord = await uploadAnyMediaToLibrary({
+        file,
+        audioSlot: slotKey,
       });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok || !payload.audioUrl) {
-        throw new Error(payload?.error || 'Audio upload failed');
-      }
 
       if (slotKey === 'bgm') {
         stopBgmPreview();
         updateData((prev) => ({
           ...prev,
+          mediaLibrary: [mediaRecord, ...prev.mediaLibrary],
           audio: {
             ...(prev.audio || DEFAULT_AUDIO_CONFIG),
-            bgmUrl: payload.audioUrl,
+            bgmUrl: mediaRecord.mediaUrl,
+            bgmMediaId: mediaRecord.id,
             bgmFilename: file.name,
             bgmSize: file.size,
             bgmEnabled: true,
           },
         }));
-        onStatus(`Uploaded Background Music: "${file.name}" (${formatBytes(file.size)})`);
+        reportStatus(
+          `Uploaded Background Music: "${file.name}" (${formatBytes(file.size)})`
+        );
       } else {
         updateData((prev) => {
           const currentAudio = prev.audio || DEFAULT_AUDIO_CONFIG;
           const currentSlot = currentAudio.sfxSlots[slotKey];
           return {
             ...prev,
+            mediaLibrary: [mediaRecord, ...prev.mediaLibrary],
             audio: {
               ...currentAudio,
               sfxSlots: {
                 ...currentAudio.sfxSlots,
                 [slotKey]: {
                   ...currentSlot,
-                  audioUrl: payload.audioUrl,
+                  audioUrl: mediaRecord.mediaUrl,
+                  mediaId: mediaRecord.id,
                   filename: file.name,
                   size: file.size,
                   enabled: true,
@@ -122,10 +136,12 @@ export const AdminAudioTab: React.FC<{ onStatus: (msg: string) => void }> = ({ o
             },
           };
         });
-        onStatus(`Uploaded custom ${audio.sfxSlots[slotKey]?.label || slotKey}: "${file.name}"`);
+        reportStatus(
+          `Uploaded custom ${audio.sfxSlots[slotKey]?.label || slotKey}: "${file.name}"`
+        );
       }
     } catch (err: any) {
-      onStatus(err?.message || 'Failed to upload audio file.');
+      reportStatus(err?.message || 'Failed to upload audio file.');
     } finally {
       setUploadingSlot(null);
     }
@@ -134,30 +150,22 @@ export const AdminAudioTab: React.FC<{ onStatus: (msg: string) => void }> = ({ o
   const handleRemoveAudioFile = async (slotKey: 'bgm' | SfxActionType) => {
     if (slotKey === 'bgm') {
       stopBgmPreview();
-      if (audio.bgmUrl?.startsWith('/api/audio/stream/')) {
-        const fname = audio.bgmUrl.split('/').pop();
-        if (fname) {
-          fetch(`/api/audio/${encodeURIComponent(fname)}`, { method: 'DELETE' }).catch(() => {});
-        }
-      }
+      // Keep the audio asset safely in Admin Media Library (Private) while removing public BGM assignment
       updateData((prev) => ({
         ...prev,
         audio: {
           ...(prev.audio || DEFAULT_AUDIO_CONFIG),
           bgmUrl: null,
+          bgmMediaId: null,
           bgmFilename: null,
           bgmSize: undefined,
         },
       }));
-      onStatus('Removed Background Music track.');
+      reportStatus(
+        'Removed Background Music from active public playback (file preserved in Admin Media Library).'
+      );
     } else {
       const currentSlot = audio.sfxSlots[slotKey];
-      if (currentSlot?.audioUrl?.startsWith('/api/audio/stream/')) {
-        const fname = currentSlot.audioUrl.split('/').pop();
-        if (fname) {
-          fetch(`/api/audio/${encodeURIComponent(fname)}`, { method: 'DELETE' }).catch(() => {});
-        }
-      }
       updateData((prev) => {
         const currentAudio = prev.audio || DEFAULT_AUDIO_CONFIG;
         return {
@@ -169,6 +177,7 @@ export const AdminAudioTab: React.FC<{ onStatus: (msg: string) => void }> = ({ o
               [slotKey]: {
                 ...currentAudio.sfxSlots[slotKey],
                 audioUrl: null,
+                mediaId: null,
                 filename: null,
                 size: undefined,
               },
@@ -176,7 +185,9 @@ export const AdminAudioTab: React.FC<{ onStatus: (msg: string) => void }> = ({ o
           },
         };
       });
-      onStatus(`Removed custom audio for ${currentSlot?.label || slotKey} (reverted to studio synthesizer).`);
+      reportStatus(
+        `Removed custom audio for ${currentSlot?.label || slotKey} (reverted to studio synthesizer; file preserved in Admin Media Library).`
+      );
     }
   };
 

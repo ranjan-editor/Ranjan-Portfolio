@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { usePortfolio } from '../../context/PortfolioContext';
 import { SoftwareToolItem } from '../../types/portfolio';
+import { uploadAnyMediaToLibrary } from '../../utils/mediaUploadService';
 
 const SOFTWARE_CATEGORIES = [
   'Video Editing',
@@ -52,41 +53,26 @@ export const AdminSoftwareTab: React.FC<AdminSoftwareTabProps> = ({ onStatusMess
   const uploadLogoImage = async (
     file: File
   ): Promise<{ imageUrl: string; mediaId: string }> => {
-    const allowedExt = ['.png', '.jpg', '.jpeg', '.webp', '.svg'];
+    const allowedExt = ['.png', '.jpg', '.jpeg', '.webp', '.avif', '.svg'];
     const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
     if (!allowedExt.includes(ext)) {
-      throw new Error('Unsupported logo format. Please upload PNG, JPG, JPEG, WEBP, or SVG.');
+      throw new Error('Unsupported logo format. Please upload PNG, JPG, JPEG, WEBP, AVIF, or SVG.');
     }
 
-    const res = await fetch('/api/media/image', {
-      method: 'POST',
-      headers: {
-        'Content-Type': file.type || 'image/png',
-        'x-filename': encodeURIComponent(file.name),
-      },
-      body: file,
-    });
-    const payload = await res.json().catch(() => ({}));
-    if (!res.ok || !payload.imageUrl) {
-      throw new Error(payload?.error || 'Failed to upload software logo.');
-    }
+    const mediaRecord = await uploadAnyMediaToLibrary({ file });
+    updateData((prev) => ({
+      ...prev,
+      mediaLibrary: [mediaRecord, ...prev.mediaLibrary],
+    }));
+
     return {
-      imageUrl: payload.imageUrl as string,
-      mediaId: (payload.id as string) || `img-${Date.now()}`,
+      imageUrl: mediaRecord.mediaUrl,
+      mediaId: mediaRecord.id,
     };
   };
 
-  const deleteLogoFromServer = async (logoUrl?: string | null) => {
-    if (!logoUrl || !logoUrl.startsWith('/api/media/stream/')) return;
-    try {
-      await fetch('/api/media/image/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageUrl: logoUrl }),
-      });
-    } catch {
-      // Ignore cleanup errors
-    }
+  const deleteLogoFromServer = async (_logoUrl?: string | null) => {
+    // Keep the uploaded logo safely in the Admin Media Library (Private) when unassigned
   };
 
   const handleAddNewSoftware = (e: React.FormEvent) => {

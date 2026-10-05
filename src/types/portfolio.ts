@@ -12,7 +12,7 @@ export interface SoftwareToolItem {
   logoMediaId?: string | null;
   logoUrl?: string | null;
   description?: string;
-  category: string; // e.g. 'Video Editing' | 'Motion Graphics' | 'Color Grading' | 'Audio' | 'Design' | 'Other Tools' | 'editing' | 'other'
+  category: string;
   proficiency: number; // 0 - 100
   enabled: boolean;
   order: number;
@@ -37,7 +37,7 @@ export interface SocialLinkItem {
   url: string;
   iconMediaId: string | null;
   iconUrl?: string | null;
-  iconType: string | null; // e.g. 'youtube' | 'instagram' | 'facebook' | 'linkedin' | 'twitter' | 'behance' | 'dribbble' | 'github' | 'vimeo' | 'tiktok' | 'whatsapp' | 'globe'
+  iconType: string | null;
   enabled: boolean;
   order: number;
 }
@@ -57,7 +57,8 @@ export interface SfxSlotConfig {
   label: string;
   enabled: boolean;
   volume: number; // 0.0 to 1.0
-  audioUrl: string | null; // custom uploaded SFX URL or null (uses Web Audio synthesized studio sound)
+  audioUrl: string | null;
+  mediaId?: string | null;
   filename?: string | null;
   size?: number;
 }
@@ -67,9 +68,10 @@ export interface AudioConfig {
   bgmEnabled: boolean;
   bgmVolume: number; // 0.0 to 1.0
   bgmLoop: boolean;
-  bgmDuckingEnabled: boolean; // Automatically duck BGM when project video plays
-  bgmDuckingVolume: number; // e.g. 0.08
+  bgmDuckingEnabled: boolean;
+  bgmDuckingVolume: number;
   bgmUrl: string | null;
+  bgmMediaId?: string | null;
   bgmFilename: string | null;
   bgmSize?: number;
   sfxMasterEnabled: boolean;
@@ -78,24 +80,61 @@ export interface AudioConfig {
 }
 
 export type MediaUploadStatus = 'uploading' | 'processing' | 'ready' | 'failed';
+export type MediaCategoryType = 'image' | 'video' | 'audio' | 'document' | 'other';
+export type MediaVisibility = 'private' | 'public';
+
+export type MediaUsageTargetType =
+  | 'profilePhoto'
+  | 'brandLogo'
+  | 'projectVideo'
+  | 'projectThumbnail'
+  | 'beforeAfterBefore'
+  | 'beforeAfterAfter'
+  | 'resume'
+  | 'softwareLogo'
+  | 'socialIcon'
+  | 'bgmAudio'
+  | 'sfxAudio'
+  | 'showreel';
+
+export interface MediaUsageReference {
+  type: MediaUsageTargetType;
+  id: string;
+  label: string;
+}
 
 export interface MediaMetadata {
   id: string;
   filename: string;
-  type: 'video' | string;
+  fileName?: string;
+  originalFileName?: string;
+  type: MediaCategoryType | string;
+  mediaType?: MediaCategoryType;
   mimeType: string;
   size: number; // in bytes
+  fileSize?: number;
   duration: number | null; // in seconds
   durationFormatted: string;
+  width?: number | null;
+  height?: number | null;
+  resolution?: string;
+  storagePath?: string;
   mediaUrl: string;
   storageUrl: string;
+  publicUrl?: string;
   thumbnailUrl: string | null;
   thumbnail: string;
   createdAt: number;
+  uploadedAt?: number;
+  updatedAt?: number;
   uploadDate: string;
-  visibility: 'public' | 'private';
+  uploadedBy?: string;
+  visibility: MediaVisibility;
+  status?: MediaUploadStatus;
   uploadStatus?: MediaUploadStatus;
-  resolution?: string;
+  isPublished?: boolean;
+  usedBy?: MediaUsageReference[];
+  usageCount?: number;
 }
 
 export interface ProjectItem {
@@ -136,6 +175,7 @@ export interface CustomFontItem {
 
 export interface ResumeMetadata {
   id: string;
+  mediaId?: string;
   type: 'resume';
   filename: string;
   fileUrl: string;
@@ -152,7 +192,9 @@ export interface BeforeAfterItem {
   beforeLabel?: string;
   afterLabel?: string;
   beforeImageUrl: string;
+  beforeMediaId?: string | null;
   afterImageUrl: string;
+  afterMediaId?: string | null;
   order: number;
   visible: boolean;
 }
@@ -193,14 +235,17 @@ export interface PortfolioConfig {
     location: string;
     logoLetter: string;
     logoUrl?: string;
+    logoMediaId?: string | null;
     heroGreeting: string;
     heroDescription: string;
     portraitUrl: string;
+    portraitMediaId?: string | null;
     experienceYears: string;
     projectsCompleted: string;
     happyClients: string;
     signatureText: string;
     showreelVideoUrl: string;
+    showreelMediaId?: string | null;
     cvUrl?: string;
   };
   resume?: ResumeMetadata | null;

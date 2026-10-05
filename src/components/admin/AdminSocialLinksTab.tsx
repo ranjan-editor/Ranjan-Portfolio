@@ -15,6 +15,7 @@ import {
 import { usePortfolio } from '../../context/PortfolioContext';
 import { SocialLinkItem } from '../../types/portfolio';
 import { renderSocialPlatformIcon } from '../Footer';
+import { uploadAnyMediaToLibrary } from '../../utils/mediaUploadService';
 
 const BUILTIN_ICON_OPTIONS = [
   { value: 'youtube', label: 'YouTube' },
@@ -59,41 +60,26 @@ export const AdminSocialLinksTab: React.FC<AdminSocialLinksTabProps> = ({
   const uploadCustomSocialIcon = async (
     file: File
   ): Promise<{ imageUrl: string; mediaId: string }> => {
-    const allowedExt = ['.png', '.jpg', '.jpeg', '.webp', '.svg'];
+    const allowedExt = ['.png', '.jpg', '.jpeg', '.webp', '.avif', '.svg'];
     const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
     if (!allowedExt.includes(ext)) {
-      throw new Error('Unsupported icon format. Please upload PNG, JPG, JPEG, WEBP, or SVG.');
+      throw new Error('Unsupported icon format. Please upload PNG, JPG, JPEG, WEBP, AVIF, or SVG.');
     }
 
-    const res = await fetch('/api/media/image', {
-      method: 'POST',
-      headers: {
-        'Content-Type': file.type || 'image/png',
-        'x-filename': encodeURIComponent(file.name),
-      },
-      body: file,
-    });
-    const payload = await res.json().catch(() => ({}));
-    if (!res.ok || !payload.imageUrl) {
-      throw new Error(payload?.error || 'Failed to upload custom social icon.');
-    }
+    const mediaRecord = await uploadAnyMediaToLibrary({ file });
+    updateData((prev) => ({
+      ...prev,
+      mediaLibrary: [mediaRecord, ...prev.mediaLibrary],
+    }));
+
     return {
-      imageUrl: payload.imageUrl as string,
-      mediaId: (payload.id as string) || `soc-icon-${Date.now()}`,
+      imageUrl: mediaRecord.mediaUrl,
+      mediaId: mediaRecord.id,
     };
   };
 
-  const deleteCustomIconFromServer = async (iconUrl?: string | null) => {
-    if (!iconUrl || !iconUrl.startsWith('/api/media/stream/')) return;
-    try {
-      await fetch('/api/media/image/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageUrl: iconUrl }),
-      });
-    } catch {
-      // Ignore cleanup errors
-    }
+  const deleteCustomIconFromServer = async (_iconUrl?: string | null) => {
+    // Keep uploaded icon safely in Admin Media Library (Private) when unassigned
   };
 
   const handleAddSocialLink = (e: React.FormEvent) => {

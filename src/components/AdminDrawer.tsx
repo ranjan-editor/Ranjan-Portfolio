@@ -54,9 +54,15 @@ import {
   uploadVideoFileResumable,
 } from '../utils/videoUploader';
 import { AdminAudioTab } from './admin/AdminAudioTab';
+import { AdminMediaLibraryTab } from './admin/AdminMediaLibraryTab';
 import { AdminSoftwareTab } from './admin/AdminSoftwareTab';
 import { AdminSkillsTab } from './admin/AdminSkillsTab';
 import { AdminSocialLinksTab } from './admin/AdminSocialLinksTab';
+import {
+  uploadAnyMediaToLibrary,
+  appendAdminTokenToUrl,
+  getAdminHeaders,
+} from '../utils/mediaUploadService';
 
 type VideoSortOption = 'newest' | 'name' | 'duration';
 
@@ -117,6 +123,7 @@ const uploadPersistentImageFile = async (file: File): Promise<string> => {
 export const AdminDrawer: React.FC = () => {
   const {
     data,
+    adminMediaLibrary,
     updateData,
     resetToDefaults,
     isAdminOpen,
@@ -145,10 +152,10 @@ export const AdminDrawer: React.FC = () => {
   const [videoSearchQuery, setVideoSearchQuery] = useState<string>('');
   const [videoSortBy, setVideoSortBy] = useState<VideoSortOption>('newest');
 
-  // Filter ONLY ready video files from Media Library, then apply search and sort
+  // Filter ONLY ready video files from Admin Media Library (both private & public), then apply search and sort
   const filteredVideoLibrary = useMemo(() => {
-    const onlyVideos = data.mediaLibrary.filter(
-      (m) => isVideoMediaItem(m) && m.uploadStatus !== 'failed'
+    const onlyVideos = adminMediaLibrary.filter(
+      (m) => isVideoMediaItem(m) && (m.status || m.uploadStatus) !== 'failed'
     );
 
     const searched = videoSearchQuery.trim()
@@ -169,7 +176,7 @@ export const AdminDrawer: React.FC = () => {
         (a.createdAt || new Date(a.uploadDate).getTime())
       );
     });
-  }, [data.mediaLibrary, videoSearchQuery, videoSortBy]);
+  }, [adminMediaLibrary, videoSearchQuery, videoSortBy]);
 
   if (!isAdminOpen) return null;
 
@@ -270,15 +277,17 @@ export const AdminDrawer: React.FC = () => {
 
     setIsAssetUploading(true);
     try {
-      const imageUrl = await uploadPersistentImageFile(file);
+      const mediaRecord = await uploadAnyMediaToLibrary({ file });
       updateData((prev) => ({
         ...prev,
+        mediaLibrary: [mediaRecord, ...prev.mediaLibrary],
         profile: {
           ...prev.profile,
-          logoUrl: imageUrl,
+          logoUrl: mediaRecord.mediaUrl,
+          logoMediaId: mediaRecord.id,
         },
       }));
-      setUploadStatus(`Uploaded & applied brand logo: "${file.name}"`);
+      setUploadStatus(`Uploaded & published brand logo: "${file.name}"`);
     } catch (err: any) {
       setUploadStatus(err?.message || 'Failed to upload brand logo.');
     } finally {
@@ -294,15 +303,17 @@ export const AdminDrawer: React.FC = () => {
 
     setIsAssetUploading(true);
     try {
-      const imageUrl = await uploadPersistentImageFile(file);
+      const mediaRecord = await uploadAnyMediaToLibrary({ file });
       updateData((prev) => ({
         ...prev,
+        mediaLibrary: [mediaRecord, ...prev.mediaLibrary],
         profile: {
           ...prev.profile,
-          portraitUrl: imageUrl,
+          portraitUrl: mediaRecord.mediaUrl,
+          portraitMediaId: mediaRecord.id,
         },
       }));
-      setUploadStatus(`Uploaded & updated Hero portrait photo: "${file.name}"`);
+      setUploadStatus(`Uploaded & published Hero portrait photo: "${file.name}"`);
     } catch (err: any) {
       setUploadStatus(err?.message || 'Failed to upload portrait image.');
     } finally {
@@ -324,29 +335,31 @@ export const AdminDrawer: React.FC = () => {
 
     setIsResumeUploading(true);
     try {
-      const res = await fetch('/api/resume/upload', {
-        method: 'POST',
-        headers: {
-          'Content-Type': file.type || 'application/pdf',
-          'x-filename': encodeURIComponent(file.name),
-        },
-        body: file,
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok || !payload.resume) {
-        throw new Error(payload?.error || 'Failed to upload Resume / CV');
-      }
-
-      const newResume: ResumeMetadata = payload.resume;
+      const mediaRecord = await uploadAnyMediaToLibrary({ file });
+      const now = Date.now();
+      const newResume: ResumeMetadata = {
+        id: mediaRecord.id,
+        mediaId: mediaRecord.id,
+        type: 'resume',
+        filename: file.name,
+        fileUrl: mediaRecord.mediaUrl,
+        mimeType: file.type || 'application/pdf',
+        size: file.size,
+        createdAt: now,
+        updatedAt: now,
+      };
       updateData((prev) => ({
         ...prev,
+        mediaLibrary: [mediaRecord, ...prev.mediaLibrary],
         resume: newResume,
         profile: {
           ...prev.profile,
           cvUrl: newResume.fileUrl,
         },
       }));
-      setUploadStatus(`Uploaded Resume / CV: "${newResume.filename}" (${formatFileSize(newResume.size)})`);
+      setUploadStatus(
+        `Uploaded & published Resume / CV: "${newResume.filename}" (${formatFileSize(newResume.size)})`
+      );
     } catch (err: any) {
       setUploadStatus(err?.message || 'Failed to upload Resume / CV.');
     } finally {
@@ -356,7 +369,10 @@ export const AdminDrawer: React.FC = () => {
 
   const handleDeleteResume = async () => {
     try {
-      await fetch('/api/resume', { method: 'DELETE' });
+      await fetch('/api/resume', {
+        method: 'DELETE',
+        headers: getAdminHeaders(),
+      });
     } catch {
       // ignore
     }
@@ -368,7 +384,9 @@ export const AdminDrawer: React.FC = () => {
         cvUrl: undefined,
       },
     }));
-    setUploadStatus('Removed active Resume / CV.');
+    setUploadStatus(
+      'Removed active Resume / CV from public website (file preserved in Admin Media Library).'
+    );
   };
 
   // Upload Before or After Image for a Comparison Item
@@ -383,18 +401,29 @@ export const AdminDrawer: React.FC = () => {
 
     setIsAssetUploading(true);
     try {
-      const imageUrl = await uploadPersistentImageFile(file);
+      const mediaRecord = await uploadAnyMediaToLibrary({ file });
       updateData((prev) => ({
         ...prev,
+        mediaLibrary: [mediaRecord, ...prev.mediaLibrary],
         beforeAfterItems: (prev.beforeAfterItems || []).map((item) =>
           item.id === itemId
             ? side === 'before'
-              ? { ...item, beforeImageUrl: imageUrl }
-              : { ...item, afterImageUrl: imageUrl }
+              ? {
+                  ...item,
+                  beforeImageUrl: mediaRecord.mediaUrl,
+                  beforeMediaId: mediaRecord.id,
+                }
+              : {
+                  ...item,
+                  afterImageUrl: mediaRecord.mediaUrl,
+                  afterMediaId: mediaRecord.id,
+                }
             : item
         ),
       }));
-      setUploadStatus(`Uploaded ${side.toUpperCase()} comparison image: "${file.name}"`);
+      setUploadStatus(
+        `Uploaded & published ${side.toUpperCase()} comparison image: "${file.name}"`
+      );
     } catch (err: any) {
       setUploadStatus(err?.message || 'Failed to upload comparison image.');
     } finally {
@@ -1190,7 +1219,7 @@ export const AdminDrawer: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => {
-                    const firstAvailableVideo = data.mediaLibrary.find(isVideoMediaItem);
+                    const firstAvailableVideo = adminMediaLibrary.find(isVideoMediaItem);
                     const newProj: ProjectItem = {
                       id: `proj-${Date.now()}`,
                       title: 'New Video Edit Project',
@@ -1215,7 +1244,7 @@ export const AdminDrawer: React.FC = () => {
               </div>
 
               {data.projects.map((proj) => {
-                const selectedVideoMedia = data.mediaLibrary.find(
+                const selectedVideoMedia = adminMediaLibrary.find(
                   (m) => m.id === proj.videoMediaId && isVideoMediaItem(m)
                 );
                 const isDeletedMedia = Boolean(proj.videoMediaId && !selectedVideoMedia);
@@ -1575,242 +1604,9 @@ export const AdminDrawer: React.FC = () => {
             </div>
           )}
 
-          {/* TAB 5: UNCOMPRESSED HD/4K MEDIA LIBRARY */}
+          {/* TAB 5: PRODUCTION MEDIA LIBRARY (PRIVATE BY DEFAULT, USAGE-TRACKED) */}
           {activeAdminTab === 'media' && (
-            <div className="space-y-5">
-              <div className="glass-card rounded-2xl p-5 border-2 border-dashed border-indigo-200 text-center space-y-3">
-                <div className="w-11 h-11 rounded-2xl bg-indigo-50 text-[#6C63FF] flex items-center justify-center mx-auto">
-                  <Upload className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-[#10152B]">
-                    Upload Original HD / 4K Video Files
-                  </h3>
-                  <p className="text-xs text-[#667085] max-w-md mx-auto mt-1">
-                    No 50 MB limit. Videos upload immediately via resumable chunks in 100% original quality, followed by automatic thumbnail generation.
-                  </p>
-                </div>
-                <label className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-[#6C63FF] hover:bg-[#10152B] text-white text-xs font-semibold transition-colors cursor-pointer">
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>Select High-Res Video File</span>
-                  <input
-                    type="file"
-                    accept="video/mp4,video/webm,video/quicktime,video/x-matroska,video/*"
-                    onChange={handleVideoMediaUpload}
-                    className="hidden"
-                  />
-                </label>
-              </div>
-
-              {activeUploadList.length > 0 && (
-                <div className="space-y-3">
-                  <h4 className="text-xs font-bold uppercase tracking-wider text-[#6C63FF]">
-                    Upload Activity ({activeUploadList.length})
-                  </h4>
-                  {activeUploadList.map((task) => (
-                    <div
-                      key={task.uploadId}
-                      className={`glass-card rounded-2xl p-4 space-y-2.5 border ${
-                        task.status === 'failed'
-                          ? 'border-rose-200 bg-rose-50/40'
-                          : 'border-indigo-100'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-bold text-[#10152B] truncate">
-                            {task.filename}
-                          </p>
-                          <div className="flex flex-wrap items-center gap-2 mt-0.5 text-[11px] text-[#667085] tabular-nums">
-                            {task.status === 'uploading' && (
-                              <>
-                                <span className="font-semibold text-[#6C63FF]">
-                                  Uploading {task.percentage}%
-                                </span>
-                                <span>·</span>
-                                <span>
-                                  Uploaded: {formatFileSize(task.uploadedBytes)} /{' '}
-                                  {formatFileSize(task.size)}
-                                </span>
-                                {task.speedBytesPerSec > 0 && (
-                                  <>
-                                    <span>·</span>
-                                    <span>Upload speed: {formatSpeed(task.speedBytesPerSec)}</span>
-                                  </>
-                                )}
-                              </>
-                            )}
-                            {task.status === 'processing' && (
-                              <span className="font-semibold text-indigo-600 flex items-center gap-1.5">
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                                Processing thumbnail...
-                              </span>
-                            )}
-                            {task.status === 'failed' && (
-                              <span className="font-semibold text-rose-600 flex items-center gap-1">
-                                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                                {task.errorMessage || 'Upload failed. Please retry.'}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-
-                        {task.status === 'uploading' && (
-                          <span className="text-xs font-extrabold text-[#6C63FF] tabular-nums shrink-0">
-                            {task.percentage}%
-                          </span>
-                        )}
-
-                        {task.status === 'failed' && (
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => startOrResumeVideoUpload(task.file, task)}
-                              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full bg-[#6C63FF] hover:bg-[#10152B] text-white text-xs font-semibold transition-colors cursor-pointer"
-                            >
-                              <RefreshCw className="w-3 h-3" />
-                              <span>Retry Upload</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => dismissFailedUploadTask(task.uploadId)}
-                              className="p-1.5 rounded-full text-[#667085] hover:bg-slate-200 transition-colors cursor-pointer"
-                              aria-label="Dismiss failed upload"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        )}
-                      </div>
-
-                      {(task.status === 'uploading' || task.status === 'processing') && (
-                        <div className="w-full h-2 rounded-full bg-indigo-100/80 overflow-hidden">
-                          <div
-                            style={{ width: `${task.percentage}%` }}
-                            className="h-full rounded-full bg-gradient-to-r from-[#3B82F6] via-[#6C63FF] to-[#8B5CF6] transition-all duration-150"
-                          />
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="space-y-3">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-[#667085]">
-                  Stored Media Metadata ({data.mediaLibrary.length} items)
-                </h4>
-                {data.mediaLibrary.map((media) => {
-                  const usedByCount = data.projects.filter(
-                    (p) => p.videoMediaId === media.id
-                  ).length;
-                  const thumbSrc = media.thumbnailUrl || media.thumbnail;
-                  const playableSrc = media.mediaUrl || media.storageUrl;
-                  const status: MediaUploadStatus = media.uploadStatus || 'ready';
-
-                  return (
-                    <div
-                      key={media.id}
-                      className="glass-card rounded-2xl p-4 flex items-center justify-between gap-4"
-                    >
-                      <div className="flex items-center gap-3.5 min-w-0 flex-1">
-                        <div className="relative w-20 h-12 rounded-xl overflow-hidden bg-slate-900 shrink-0 flex items-center justify-center">
-                          {thumbSrc ? (
-                            <img
-                              src={thumbSrc}
-                              alt={media.filename}
-                              referrerPolicy="no-referrer"
-                              className="w-full h-full object-cover"
-                            />
-                          ) : status === 'processing' ? (
-                            <Loader2 className="w-4 h-4 text-indigo-300 animate-spin" />
-                          ) : (
-                            <Film className="w-4 h-4 text-indigo-300" />
-                          )}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="text"
-                              value={media.filename}
-                              onChange={(e) =>
-                                updateData((prev) => ({
-                                  ...prev,
-                                  mediaLibrary: prev.mediaLibrary.map((m) =>
-                                    m.id === media.id ? { ...m, filename: e.target.value } : m
-                                  ),
-                                }))
-                              }
-                              title="Rename video in Media Library (projects linked by ID remain connected)"
-                              className="text-xs font-bold text-[#10152B] bg-white/80 hover:bg-white focus:bg-white px-2 py-1 rounded-lg border border-transparent hover:border-indigo-100 focus:border-[#6C63FF] focus:outline-none w-full truncate"
-                            />
-                            <span
-                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 ${
-                                status === 'ready'
-                                  ? 'bg-emerald-50 text-emerald-700'
-                                  : status === 'processing'
-                                  ? 'bg-indigo-50 text-[#6C63FF]'
-                                  : 'bg-amber-50 text-amber-700'
-                              }`}
-                            >
-                              {status === 'ready'
-                                ? 'Ready'
-                                : status === 'processing'
-                                ? 'Processing thumbnail...'
-                                : status}
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-[#667085] tabular-nums mt-0.5 px-2">
-                            {media.mimeType || media.type} · {formatFileSize(media.size)} ·{' '}
-                            {media.durationFormatted} · {media.resolution || 'Original HD'}
-                            {usedByCount > 0 && (
-                              <span className="ml-2 text-[#6C63FF] font-semibold">
-                                · Used in {usedByCount} project{usedByCount > 1 ? 's' : ''}
-                              </span>
-                            )}
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setActiveVideoModal({
-                              isOpen: true,
-                              videoMediaId: media.id,
-                              mediaType: media.mimeType || 'video/mp4',
-                              title: media.filename,
-                              videoUrl: playableSrc,
-                              thumbnail: thumbSrc || undefined,
-                              duration: media.durationFormatted,
-                            })
-                          }
-                          className="p-2 rounded-xl bg-indigo-50 text-[#6C63FF] hover:bg-[#6C63FF] hover:text-white transition-colors cursor-pointer"
-                          title="Preview Stream"
-                        >
-                          <Play className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            updateData((prev) => ({
-                              ...prev,
-                              mediaLibrary: prev.mediaLibrary.filter((m) => m.id !== media.id),
-                            }))
-                          }
-                          className="p-2 rounded-xl text-rose-500 hover:bg-rose-50 transition-colors cursor-pointer"
-                          title="Delete video from Media Library"
-                          aria-label="Delete video from Media Library"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+            <AdminMediaLibraryTab onStatusMessage={(msg) => setUploadStatus(msg)} />
           )}
 
           {/* TAB 6: SERVICES */}
@@ -2223,7 +2019,11 @@ export const AdminDrawer: React.FC = () => {
                   filteredVideoLibrary.map((videoItem) => {
                     const isCurrentlySelected =
                       activeSelectorProject?.videoMediaId === videoItem.id;
-                    const thumbSrc = videoItem.thumbnailUrl || videoItem.thumbnail;
+                    const rawThumbSrc = videoItem.thumbnailUrl || videoItem.thumbnail;
+                    const thumbSrc = rawThumbSrc
+                      ? appendAdminTokenToUrl(rawThumbSrc, isAdminAuthenticated)
+                      : '';
+                    const isPublic = videoItem.visibility === 'public' && videoItem.isPublished;
 
                     return (
                       <button
@@ -2258,9 +2058,20 @@ export const AdminDrawer: React.FC = () => {
                           </div>
 
                           <div className="min-w-0">
-                            <p className="text-xs font-bold text-[#10152B] truncate">
-                              {videoItem.filename}
-                            </p>
+                            <div className="flex items-center gap-1.5">
+                              <p className="text-xs font-bold text-[#10152B] truncate">
+                                {videoItem.filename}
+                              </p>
+                              <span
+                                className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold shrink-0 ${
+                                  isPublic
+                                    ? 'bg-emerald-50 text-emerald-700'
+                                    : 'bg-slate-100 text-slate-600'
+                                }`}
+                              >
+                                {isPublic ? '🌐 Public' : '🔒 Private'}
+                              </span>
+                            </div>
                             <div className="flex flex-wrap items-center gap-1.5 mt-1 text-[11px] text-[#667085] tabular-nums">
                               <span className="font-semibold text-[#6C63FF]">
                                 {videoItem.durationFormatted}
